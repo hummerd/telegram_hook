@@ -2,30 +2,38 @@ package telegram_hook
 
 import (
 	"bytes"
+	"encoding"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
-	"strings"
+	"sync"
 
-	"github.com/Sirupsen/logrus"
+	"github.com/sirupsen/logrus"
+)
+
+var (
+	messageBuff = sync.Pool{New: func() interface{} { return &textBuffer{} }}
+	requestBuff = sync.Pool{New: func() interface{} { return &bytes.Buffer{} }}
 )
 
 // TelegramHook to send logs via the Telegram API.
 type TelegramHook struct {
-	AppName     string
-	c           *http.Client
-	authToken   string
-	targetID    string
-	apiEndpoint string
+	AppName         string
+	c               *http.Client
+	authToken       string
+	targetID        string
+	apiEndpoint     string
+	apiEndpointGet  string
+	apiEndpointSend string
 }
 
 // apiRequest encapsulates the request structure we are sending to the
 // Telegram API.
 type apiRequest struct {
-	ChatID    string `json:"chat_id"`
-	Text      string `json:"text"`
-	ParseMode string `json:"parse_mode,omitempty"`
+	ChatID    string                 `json:"chat_id"`
+	Text      encoding.TextMarshaler `json:"text"`
+	ParseMode string                 `json:"parse_mode,omitempty"`
 }
 
 // apiResponse encapsulates the response structure received from the
@@ -37,20 +45,30 @@ type apiResponse struct {
 	Result    *interface{} `json:"result,omitempty"`
 }
 
+type textBuffer struct {
+	bytes.Buffer
+}
+
+func (tb *textBuffer) MarshalText() (text []byte, err error) {
+	return tb.Bytes(), nil
+}
+
 // NewTelegramHook creates a new instance of a hook targeting the
 // Telegram API.
 func NewTelegramHook(appName, authToken, targetID string) (*TelegramHook, error) {
 	client := http.Client{}
-	apiEndpoint := fmt.Sprintf(
-		"https://api.telegram.org/bot%s",
-		authToken,
-	)
+	apiEndpoint := "https://api.telegram.org/bot" + authToken
+	apiEndpointGet := apiEndpoint + "/getme"
+	apiEndpointSend := apiEndpoint + "/sendmessage"
+
 	h := TelegramHook{
-		AppName:     appName,
-		c:           &client,
-		authToken:   authToken,
-		targetID:    targetID,
-		apiEndpoint: apiEndpoint,
+		AppName:         appName,
+		c:               &client,
+		authToken:       authToken,
+		targetID:        targetID,
+		apiEndpoint:     apiEndpoint,
+		apiEndpointGet:  apiEndpointGet,
+		apiEndpointSend: apiEndpointSend,
 	}
 
 	// Verify the API token is valid and correct before continuing
@@ -65,8 +83,7 @@ func NewTelegramHook(appName, authToken, targetID string) (*TelegramHook, error)
 // verifyToken issues a test request to the Telegram API to ensure the
 // provided token is correct and valid.
 func (hook *TelegramHook) verifyToken() error {
-	endpoint := strings.Join([]string{hook.apiEndpoint, "getme"}, "/")
-	res, err := hook.c.Get(endpoint)
+	res, err := hook.c.Get(hook.apiEndpointGet)
 	if err != nil {
 		return err
 	}
@@ -96,22 +113,23 @@ func (hook *TelegramHook) verifyToken() error {
 }
 
 // sendMessage issues the provided message to the Telegram API.
-func (hook *TelegramHook) sendMessage(msg string) error {
+func (hook *TelegramHook) sendMessage(msg *textBuffer) error {
 	apiReq := apiRequest{
 		ChatID:    hook.targetID,
 		Text:      msg,
 		ParseMode: "HTML",
 	}
-	b, err := json.Marshal(apiReq)
+
+	buff := requestBuff.Get().(*bytes.Buffer)
+	buff.Reset()
+	defer requestBuff.Put(buff)
+
+	err := json.NewEncoder(buff).Encode(apiReq)
 	if err != nil {
 		return err
 	}
 
-	res, err := hook.c.Post(
-		strings.Join([]string{hook.apiEndpoint, "sendmessage"}, "/"),
-		"application/json",
-		bytes.NewReader(b),
-	)
+	res, err := hook.c.Post(hook.apiEndpointSend, "application/json", buff)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Encountered error when issuing request to Telegram API, %v", err)
 		return err
@@ -141,33 +159,36 @@ func (hook *TelegramHook) sendMessage(msg string) error {
 
 // createMessage crafts an HTML-formatted message to send to the
 // Telegram API.
-func (hook *TelegramHook) createMessage(entry *logrus.Entry) string {
-	var msg string
-
+func (hook *TelegramHook) writeMessage(entry *logrus.Entry, buff *textBuffer) {
 	switch entry.Level {
 	case logrus.PanicLevel:
-		msg = "<b>PANIC</b>"
+		buff.WriteString("<b>PANIC</b>")
 	case logrus.FatalLevel:
-		msg = "<b>FATAL</b>"
+		buff.WriteString("<b>FATAL</b>")
 	case logrus.ErrorLevel:
-		msg = "<b>ERROR</b>"
+		buff.WriteString("<b>ERROR</b>")
 	}
 
-	msg = strings.Join([]string{msg, hook.AppName}, "@")
-	msg = strings.Join([]string{msg, entry.Message}, " - ")
-	fields, err := json.MarshalIndent(entry.Data, "", "\t")
-	if err == nil {
-		msg = strings.Join([]string{msg, "<pre>"}, "\n")
-		msg = strings.Join([]string{msg, string(fields)}, "\n")
-		msg = strings.Join([]string{msg, "</pre>"}, "\n")
-	}
-	return msg
+	buff.WriteString("@")
+	buff.WriteString(hook.AppName)
+	buff.WriteString(" - ")
+	buff.WriteString(entry.Message)
+
+	buff.WriteString("\n<pre>\n")
+	enc := json.NewEncoder(buff)
+	enc.SetIndent("", "\t")
+	enc.Encode(entry.Data)
+	buff.WriteString("\n</pre>")
 }
 
 // Fire emits a log message to the Telegram API.
 func (hook *TelegramHook) Fire(entry *logrus.Entry) error {
-	msg := hook.createMessage(entry)
-	err := hook.sendMessage(msg)
+	buff := messageBuff.Get().(*textBuffer)
+	buff.Reset()
+	defer messageBuff.Put(buff)
+
+	hook.writeMessage(entry, buff)
+	err := hook.sendMessage(buff)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Unable to send message, %v", err)
 		return err
