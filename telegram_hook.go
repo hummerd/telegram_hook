@@ -22,7 +22,7 @@ type TelegramHook struct {
 	AppName         string
 	c               *http.Client
 	authToken       string
-	targetID        string
+	chatID          int
 	apiEndpoint     string
 	apiEndpointGet  string
 	apiEndpointSend string
@@ -31,7 +31,7 @@ type TelegramHook struct {
 // apiRequest encapsulates the request structure we are sending to the
 // Telegram API.
 type apiRequest struct {
-	ChatID    string                 `json:"chat_id"`
+	ChatID    int                    `json:"chat_id"`
 	Text      encoding.TextMarshaler `json:"text"`
 	ParseMode string                 `json:"parse_mode,omitempty"`
 }
@@ -55,7 +55,7 @@ func (tb *textBuffer) MarshalText() (text []byte, err error) {
 
 // NewTelegramHook creates a new instance of a hook targeting the
 // Telegram API.
-func NewTelegramHook(appName, authToken, targetID string) (*TelegramHook, error) {
+func NewTelegramHook(appName, authToken string, chatID int) (*TelegramHook, error) {
 	client := http.Client{}
 	apiEndpoint := "https://api.telegram.org/bot" + authToken
 	apiEndpointGet := apiEndpoint + "/getme"
@@ -65,7 +65,7 @@ func NewTelegramHook(appName, authToken, targetID string) (*TelegramHook, error)
 		AppName:         appName,
 		c:               &client,
 		authToken:       authToken,
-		targetID:        targetID,
+		chatID:          chatID,
 		apiEndpoint:     apiEndpoint,
 		apiEndpointGet:  apiEndpointGet,
 		apiEndpointSend: apiEndpointSend,
@@ -115,7 +115,7 @@ func (hook *TelegramHook) verifyToken() error {
 // sendMessage issues the provided message to the Telegram API.
 func (hook *TelegramHook) sendMessage(msg *textBuffer) error {
 	apiReq := apiRequest{
-		ChatID:    hook.targetID,
+		ChatID:    hook.chatID,
 		Text:      msg,
 		ParseMode: "HTML",
 	}
