@@ -174,6 +174,15 @@ func (hook *TelegramHook) writeMessage(entry *logrus.Entry, buff *textBuffer) {
 	buff.WriteString(" - ")
 	buff.WriteString(entry.Message)
 
+	errToLogI := entry.Data[logrus.ErrorKey]
+	if errToLogI != nil {
+		errToLog, ok := errToLogI.(error)
+		if ok && errToLog != nil {
+			buff.WriteString(": ")
+			buff.WriteString(errToLog.Error())
+		}
+	}
+
 	buff.WriteString("\n<pre>\n")
 	enc := json.NewEncoder(buff)
 	enc.SetIndent("", "\t")
